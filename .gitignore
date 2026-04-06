@@ -1,0 +1,17 @@
+# Environment variables (NEVER commit this)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+
+# Data directories (large files)
+uploads/
+frames/
+qdrant_data/

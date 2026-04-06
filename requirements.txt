@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+qdrant-client
+sentence-transformers
+groq
+ffmpeg-python
+imageio-ffmpeg
+Pillow
+python-dotenv
+yt-dlp
