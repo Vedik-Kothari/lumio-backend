@@ -14,4 +14,9 @@ env/
 # Data directories (large files)
 uploads/
 frames/
+metadata/
 qdrant_data/
+
+# Local runtime files
+*.log
+*.pid
