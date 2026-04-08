@@ -6,6 +6,7 @@ import imageio_ffmpeg
 from PIL import Image
 
 from services.ai_pipeline import AILogic
+from services.runtime_paths import audio_file_path, public_frame_path, video_frames_dir
 from services.vector_store import VectorStore
 
 FRAME_INTERVAL_SECONDS = 5
@@ -217,7 +218,7 @@ async def caption_visual_changes(frames_dir: str, progress_callback: ProgressCal
     return [
         {
             "time": entry["time"],
-            "path": entry["path"],
+            "path": public_frame_path(os.path.basename(frames_dir), os.path.basename(entry["path"])),
             "caption": entry["caption"],
         }
         for entry in grid_entries
@@ -263,8 +264,8 @@ async def enrich_visual_index(
 
 
 async def process_video_pipeline(video_path: str, video_id: str, progress_callback: ProgressCallback = lambda *args, **kwargs: None):
-    audio_path = f"uploads/{video_id}.mp3"
-    frames_dir = f"frames/{video_id}"
+    audio_path = audio_file_path(video_id)
+    frames_dir = video_frames_dir(video_id)
     os.makedirs(frames_dir, exist_ok=True)
 
     print(f"Extracting media for {video_id}...")

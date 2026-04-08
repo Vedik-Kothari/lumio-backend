@@ -13,6 +13,15 @@ from datetime import datetime
 
 from services.video_processor import process_video_pipeline
 from services.ai_pipeline import AILogic
+from services.runtime_paths import (
+    UPLOADS_DIR,
+    FRAMES_DIR,
+    ensure_runtime_dirs,
+    metadata_file_path,
+    upload_file_path,
+    uploaded_matches_pattern,
+    video_frames_dir,
+)
 
 app = FastAPI(title="Multimodal RAG API")
 
@@ -24,14 +33,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "uploads"
-METADATA_DIR = "metadata"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs("frames", exist_ok=True)
-os.makedirs(METADATA_DIR, exist_ok=True)
+ensure_runtime_dirs()
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-app.mount("/frames", StaticFiles(directory="frames"), name="frames")
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
+app.mount("/frames", StaticFiles(directory=FRAMES_DIR), name="frames")
 
 class QueryRequest(BaseModel):
     query: str
@@ -57,17 +62,16 @@ import yt_dlp
 
 def cleanup_old_files(current_video_id: str):
     try:
-        if os.path.exists(UPLOAD_DIR):
-            for file_name in os.listdir(UPLOAD_DIR):
+        if os.path.exists(UPLOADS_DIR):
+            for file_name in os.listdir(UPLOADS_DIR):
                 if current_video_id not in file_name:
-                    file_path = os.path.join(UPLOAD_DIR, file_name)
+                    file_path = os.path.join(UPLOADS_DIR, file_name)
                     if os.path.isfile(file_path):
                         os.remove(file_path)
-        frames_base = "frames"
-        if os.path.exists(frames_base):
-            for item in os.listdir(frames_base):
+        if os.path.exists(FRAMES_DIR):
+            for item in os.listdir(FRAMES_DIR):
                 if current_video_id not in item:
-                    item_path = os.path.join(frames_base, item)
+                    item_path = os.path.join(FRAMES_DIR, item)
                     if os.path.isdir(item_path):
                         shutil.rmtree(item_path)
                     elif os.path.isfile(item_path):
@@ -77,12 +81,12 @@ def cleanup_old_files(current_video_id: str):
 
 def delete_video_assets(video_id: str):
     try:
-        matches = glob.glob(os.path.join(UPLOAD_DIR, f"{video_id}.*"))
+        matches = glob.glob(uploaded_matches_pattern(video_id))
         for file_path in matches:
             if os.path.isfile(file_path):
                 os.remove(file_path)
 
-        frame_dir = os.path.join("frames", video_id)
+        frame_dir = video_frames_dir(video_id)
         if os.path.isdir(frame_dir):
             shutil.rmtree(frame_dir)
 
@@ -97,7 +101,7 @@ def delete_video_assets(video_id: str):
 progress_store = {}
 
 def metadata_path(video_id: str) -> str:
-    return os.path.join(METADATA_DIR, f"{video_id}.json")
+    return metadata_file_path(video_id)
 
 def read_video_metadata(video_id: str) -> dict:
     try:
@@ -161,7 +165,7 @@ async def upload_video_link(request: UrlUploadRequest):
     set_progress(video_id, "Downloading Video...", 0, phase="downloading")
     
     ydl_opts = {
-        'outtmpl': os.path.join(UPLOAD_DIR, f'{video_id}.%(ext)s'),
+        'outtmpl': os.path.join(UPLOADS_DIR, f'{video_id}.%(ext)s'),
         'format': 'best',  # simple reliable format
     }
     
@@ -205,7 +209,7 @@ async def upload_video(file: UploadFile = File(...), video_id: str = None):
     set_progress(video_id, "Saving uploaded file...", 0, phase="uploading")
     
     file_extension = file.filename.split(".")[-1]
-    file_path = os.path.join(UPLOAD_DIR, f"{video_id}.{file_extension}")
+    file_path = upload_file_path(video_id, file_extension)
     write_video_metadata(
         video_id,
         {
@@ -308,7 +312,7 @@ import glob
 @app.get("/api/video/{video_id}")
 async def get_video(video_id: str):
     # Find the video file with the matching ID regardless of extension
-    matches = glob.glob(os.path.join(UPLOAD_DIR, f"{video_id}.*"))
+    matches = glob.glob(uploaded_matches_pattern(video_id))
     if not matches:
         raise HTTPException(status_code=404, detail="Video not found")
     

@@ -56,6 +56,7 @@ Create `backend/.env`:
 GROQ_API_KEY=your_groq_api_key
 QDRANT_URL=https://your-qdrant-cluster-url
 QDRANT_API_KEY=your_qdrant_api_key
+APP_DATA_DIR=/app/data
 ```
 
 ## Run Locally
@@ -115,6 +116,23 @@ Runtime requirements:
 - Python 3.11+
 - `ffmpeg` installed and available
 - network access to Groq and Qdrant
+- one writable runtime data directory for uploads, frames, metadata, and local Qdrant fallback
+
+### Railway Volume Recommendation
+
+For Railway, mount a single volume to:
+
+```text
+/app/data
+```
+
+The backend now stores all runtime files under `APP_DATA_DIR`, so one Railway volume is enough for:
+
+- uploaded videos
+- extracted audio
+- frame grids
+- metadata files
+- local Qdrant fallback data
 
 ## Frontend Integration
 

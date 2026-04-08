@@ -16,6 +16,7 @@ uploads/
 frames/
 metadata/
 qdrant_data/
+data/
 
 # Local runtime files
 *.log

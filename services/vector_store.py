@@ -4,6 +4,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 from sentence_transformers import SentenceTransformer
 import uuid
+from services.runtime_paths import QDRANT_DIR, ensure_runtime_dirs
 
 # Load local embedding model
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -12,7 +13,8 @@ embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 # Support Qdrant Cloud or fallback to local
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_PATH = os.path.join(os.getcwd(), "qdrant_data")
+ensure_runtime_dirs()
+QDRANT_PATH = QDRANT_DIR
 LOCK_FILE = os.path.join(QDRANT_PATH, ".lock")
 
 def _build_local_client():

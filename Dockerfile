@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+ENV APP_DATA_DIR=/app/data
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -14,8 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the backend application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p uploads frames qdrant_data
+# Create the shared runtime data directory
+RUN mkdir -p /app/data
 
 EXPOSE 8000
 
