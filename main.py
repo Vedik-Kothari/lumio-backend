@@ -36,10 +36,12 @@ app.mount("/frames", StaticFiles(directory="frames"), name="frames")
 class QueryRequest(BaseModel):
     query: str
     video_id: str | None = None
+    video_ids: list[str] | None = None
 
 class WorkbenchRequest(BaseModel):
     mode: str
     video_id: str | None = None
+    video_ids: list[str] | None = None
     query: str | None = None
     output_format: str | None = None
     scope: str = "current_video"
@@ -47,6 +49,9 @@ class WorkbenchRequest(BaseModel):
 class UrlUploadRequest(BaseModel):
     url: str
     video_id: str | None = None
+
+class DeleteVideosRequest(BaseModel):
+    video_ids: list[str]
 
 import yt_dlp
 
@@ -69,6 +74,25 @@ def cleanup_old_files(current_video_id: str):
                         os.remove(item_path)
     except Exception as e:
         print(f"Cleanup error: {e}")
+
+def delete_video_assets(video_id: str):
+    try:
+        matches = glob.glob(os.path.join(UPLOAD_DIR, f"{video_id}.*"))
+        for file_path in matches:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+        frame_dir = os.path.join("frames", video_id)
+        if os.path.isdir(frame_dir):
+            shutil.rmtree(frame_dir)
+
+        meta_file = metadata_path(video_id)
+        if os.path.isfile(meta_file):
+            os.remove(meta_file)
+
+        progress_store.pop(video_id, None)
+    except Exception as e:
+        print(f"Delete asset error for {video_id}: {e}")
 
 progress_store = {}
 
@@ -214,7 +238,7 @@ async def upload_video(file: UploadFile = File(...), video_id: str = None):
 async def search(request: QueryRequest):
     query = request.query
     try:
-        results = await AILogic.search_and_generate(query, video_id=request.video_id)
+        results = await AILogic.search_and_generate(query, video_id=request.video_id, video_ids=request.video_ids)
         return results
     except Exception as e:
         print(f"Error during search: {e}")
@@ -226,6 +250,7 @@ async def workbench(request: WorkbenchRequest):
         result = await AILogic.run_workbench(
             mode=request.mode,
             video_id=request.video_id,
+            video_ids=request.video_ids,
             query=request.query,
             output_format=request.output_format,
             scope=request.scope,
@@ -258,6 +283,24 @@ async def get_library():
             }
         )
     return {"videos": videos}
+
+@app.delete("/api/library")
+async def delete_library_videos(request: DeleteVideosRequest):
+    from services.vector_store import VectorStore
+
+    if not request.video_ids:
+        raise HTTPException(status_code=400, detail="No video_ids provided")
+
+    deleted = []
+    for video_id in request.video_ids:
+        try:
+            VectorStore.delete_video_chunks(video_id)
+            delete_video_assets(video_id)
+            deleted.append(video_id)
+        except Exception as e:
+            print(f"Failed to delete {video_id}: {e}")
+
+    return {"deleted_video_ids": deleted}
 
 from fastapi.responses import FileResponse
 import glob

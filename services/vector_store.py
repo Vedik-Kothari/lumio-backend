@@ -1,7 +1,7 @@
 import hashlib
 import os
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 from sentence_transformers import SentenceTransformer
 import uuid
 
@@ -35,15 +35,37 @@ fallback_client = _build_local_client()
 
 COLLECTION_NAME = "multilingual_video_chunks"
 
-def init_qdrant():
-    for client in {primary_client, fallback_client}:
+def _iter_clients():
+    seen = set()
+    for client in (primary_client, fallback_client):
+        client_id = id(client)
+        if client_id in seen:
+            continue
+        seen.add(client_id)
+        yield client
+
+def _ensure_collection(client) -> bool:
+    try:
+        client.get_collection(COLLECTION_NAME)
+        return True
+    except Exception:
         try:
-            client.get_collection(COLLECTION_NAME)
-        except Exception:
             client.create_collection(
                 collection_name=COLLECTION_NAME,
                 vectors_config=VectorParams(size=384, distance=Distance.COSINE),
             )
+            return True
+        except Exception as e:
+            print(f"Qdrant collection setup failed: {e}")
+            return False
+
+def init_qdrant():
+    initialized = False
+    for client in _iter_clients():
+        initialized = _ensure_collection(client) or initialized
+
+    if not initialized:
+        raise RuntimeError("No Qdrant client could be initialized.")
 
 init_qdrant()
 
@@ -87,7 +109,7 @@ class VectorStore:
                 )
             )
 
-        for client in {primary_client, fallback_client}:
+        for client in _iter_clients():
             try:
                 client.upsert(
                     collection_name=COLLECTION_NAME,
@@ -108,7 +130,7 @@ class VectorStore:
             ]
         )
 
-        for client in {primary_client, fallback_client}:
+        for client in _iter_clients():
             try:
                 client.delete(
                     collection_name=COLLECTION_NAME,
@@ -123,11 +145,19 @@ class VectorStore:
         return VectorStore.add_chunks(chunks)
     
     @staticmethod
-    def search(query: str, limit: int = 4, video_id: str | None = None):
-        vector = embedding_model.encode(query).tolist()
-        query_filter = None
+    def _build_video_filter(video_id: str | None = None, video_ids: list[str] | None = None):
+        if video_ids:
+            return Filter(
+                must=[
+                    FieldCondition(
+                        key="video_id",
+                        match=MatchAny(any=video_ids),
+                    )
+                ]
+            )
+
         if video_id:
-            query_filter = Filter(
+            return Filter(
                 must=[
                     FieldCondition(
                         key="video_id",
@@ -135,6 +165,13 @@ class VectorStore:
                     )
                 ]
             )
+
+        return None
+
+    @staticmethod
+    def search(query: str, limit: int = 4, video_id: str | None = None, video_ids: list[str] | None = None):
+        vector = embedding_model.encode(query).tolist()
+        query_filter = VectorStore._build_video_filter(video_id=video_id, video_ids=video_ids)
 
         last_error = None
         for client in (primary_client, fallback_client):
@@ -155,17 +192,8 @@ class VectorStore:
         return []
 
     @staticmethod
-    def get_chunks(video_id: str | None = None, limit: int = 200):
-        scroll_filter = None
-        if video_id:
-            scroll_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="video_id",
-                        match=MatchValue(value=video_id),
-                    )
-                ]
-            )
+    def get_chunks(video_id: str | None = None, video_ids: list[str] | None = None, limit: int = 200):
+        scroll_filter = VectorStore._build_video_filter(video_id=video_id, video_ids=video_ids)
 
         last_error = None
         for client in (primary_client, fallback_client):
@@ -185,10 +213,10 @@ class VectorStore:
                         VectorStore._timestamp_to_seconds(payload.get("timestamp", "")),
                     )
                 )
-                if video_id:
+                if video_id or video_ids:
                     deduped = {}
                     for payload in payloads:
-                        dedupe_key = payload.get("timestamp", "")
+                        dedupe_key = f"{payload.get('video_id', '')}:{payload.get('timestamp', '')}"
                         if dedupe_key not in deduped or deduped[dedupe_key].get("stage") != "enriched":
                             deduped[dedupe_key] = payload
                     return sorted(

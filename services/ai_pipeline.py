@@ -85,11 +85,11 @@ class AILogic:
             return "Vision caption unavailable for this moment."
 
     @classmethod
-    async def search_and_generate(cls, query: str, video_id: str | None = None):
+    async def search_and_generate(cls, query: str, video_id: str | None = None, video_ids: list[str] | None = None):
         from services.vector_store import VectorStore
         
         # 1. Retrieve using Vector Store
-        retrieved_chunks = VectorStore.search(query, limit=5, video_id=video_id)
+        retrieved_chunks = VectorStore.search(query, limit=5, video_id=video_id, video_ids=video_ids)
         
         if not retrieved_chunks:
             return {"answer": "I couldn't find any relevant moments in the source materials.", "sources": []}
@@ -177,6 +177,7 @@ class AILogic:
         *,
         mode: str,
         video_id: str | None = None,
+        video_ids: list[str] | None = None,
         query: str | None = None,
         output_format: str | None = None,
         scope: str = "current_video",
@@ -184,11 +185,20 @@ class AILogic:
         from services.vector_store import VectorStore
 
         if mode == "cross_video_memory":
-            source_chunks = VectorStore.search(query or "main themes and differences", limit=12, video_id=None)
+            source_chunks = VectorStore.search(query or "main themes and differences", limit=12, video_id=None, video_ids=video_ids)
         elif query:
-            source_chunks = VectorStore.search(query, limit=10, video_id=video_id if scope != "all_videos" else None)
+            source_chunks = VectorStore.search(
+                query,
+                limit=10,
+                video_id=video_id if scope not in {"all_videos", "selected_videos"} else None,
+                video_ids=video_ids if scope == "selected_videos" else None,
+            )
         else:
-            source_chunks = VectorStore.get_chunks(video_id=video_id if scope != "all_videos" else None, limit=120)
+            source_chunks = VectorStore.get_chunks(
+                video_id=video_id if scope not in {"all_videos", "selected_videos"} else None,
+                video_ids=video_ids if scope == "selected_videos" else None,
+                limit=120,
+            )
 
         if not source_chunks:
             return {
