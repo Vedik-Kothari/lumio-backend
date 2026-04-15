@@ -14,6 +14,7 @@ from datetime import datetime
 from services.video_processor import process_video_pipeline
 from services.ai_pipeline import AILogic
 from services.runtime_paths import (
+    DATA_ROOT,
     UPLOADS_DIR,
     FRAMES_DIR,
     ensure_runtime_dirs,
@@ -59,6 +60,72 @@ class DeleteVideosRequest(BaseModel):
     video_ids: list[str]
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
+
+YTDLP_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+YTDLP_COOKIES_FILE = os.path.join(DATA_ROOT, "yt-dlp-cookies.txt")
+
+
+def _prepare_ytdlp_cookies_file() -> str | None:
+    cookies_path = os.getenv("YTDLP_COOKIES_PATH")
+    if cookies_path and os.path.isfile(cookies_path):
+        return cookies_path
+
+    cookies_content = os.getenv("YTDLP_COOKIES")
+    if cookies_content:
+        with open(YTDLP_COOKIES_FILE, "w", encoding="utf-8") as cookie_file:
+            cookie_file.write(cookies_content)
+        return YTDLP_COOKIES_FILE
+
+    return None
+
+
+def build_ytdlp_options(video_id: str) -> dict:
+    ydl_opts = {
+        "outtmpl": os.path.join(UPLOADS_DIR, f"{video_id}.%(ext)s"),
+        "format": "best",
+        "noplaylist": True,
+        "retries": 2,
+        "http_headers": {
+            "User-Agent": os.getenv("YTDLP_USER_AGENT", YTDLP_DEFAULT_USER_AGENT),
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
+    }
+
+    cookies_file = _prepare_ytdlp_cookies_file()
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+
+    return ydl_opts
+
+
+def classify_ytdlp_error(error: Exception) -> tuple[int, str]:
+    message = str(error)
+    lowered = message.lower()
+
+    if "sign in to confirm you’re not a bot" in lowered or "sign in to confirm you're not a bot" in lowered:
+        return (
+            422,
+            "YouTube blocked this download from the cloud server with a bot-check. "
+            "Try uploading the video file directly, or configure backend env var "
+            "`YTDLP_COOKIES` or `YTDLP_COOKIES_PATH` with exported YouTube cookies to enable authenticated downloads.",
+        )
+
+    if "http error 429" in lowered or "too many requests" in lowered:
+        return (
+            429,
+            "YouTube rate-limited this server while fetching the video. "
+            "Please retry in a bit, upload the file directly, or configure yt-dlp cookies for the backend.",
+        )
+
+    return 500, message
 
 def cleanup_old_files(current_video_id: str):
     try:
@@ -163,11 +230,7 @@ async def upload_video_link(request: UrlUploadRequest):
         
     video_id = request.video_id or str(uuid.uuid4())
     set_progress(video_id, "Downloading Video...", 0, phase="downloading")
-    
-    ydl_opts = {
-        'outtmpl': os.path.join(UPLOADS_DIR, f'{video_id}.%(ext)s'),
-        'format': 'best',  # simple reliable format
-    }
+    ydl_opts = build_ytdlp_options(video_id)
     
     try:
         def update_progress(status: str, percent: int, **extra):
@@ -195,6 +258,18 @@ async def upload_video_link(request: UrlUploadRequest):
         # Run processing pipeline
         result = await process_video_pipeline(file_path, video_id, progress_callback=update_progress)
         return {"status": "success", "video_id": video_id, **result}
+    except DownloadError as e:
+        status_code, detail = classify_ytdlp_error(e)
+        print(f"Error during link processing: {e}")
+        set_progress(
+            video_id,
+            "Link download blocked",
+            0,
+            phase="error",
+            is_complete=True,
+            error=detail,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
     except Exception as e:
         print(f"Error during link processing: {e}")
         set_progress(video_id, "Error occurred", 0, phase="error", is_complete=True, error=str(e))
