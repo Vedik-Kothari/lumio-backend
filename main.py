@@ -91,7 +91,8 @@ def _prepare_ytdlp_cookies_file() -> str | None:
 def build_ytdlp_options(video_id: str) -> dict:
     ydl_opts = {
         "outtmpl": os.path.join(UPLOADS_DIR, f"{video_id}.%(ext)s"),
-        "format": "best",
+        "format": "bv*+ba/b",
+        "merge_output_format": "mp4",
         "noplaylist": True,
         "retries": 2,
         "http_headers": {
@@ -129,6 +130,13 @@ def classify_ytdlp_error(error: Exception) -> tuple[int, str]:
             429,
             "YouTube rate-limited this server while fetching the video. "
             "Please retry in a bit, or configure yt-dlp cookies for the backend to improve direct-access fallback.",
+        )
+
+    if "requested format is not available" in lowered:
+        return (
+            422,
+            "This YouTube video exposed an unusual playback format and the server-side fallback could not select a compatible stream. "
+            "Lumio will keep preferring transcript-first retrieval, but this specific link still needs a more permissive fallback path.",
         )
 
     return 500, message
