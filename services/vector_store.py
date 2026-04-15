@@ -1,14 +1,19 @@
 import hashlib
 import os
+import threading
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 from sentence_transformers import SentenceTransformer
 import uuid
-from services.runtime_paths import QDRANT_DIR, ensure_runtime_dirs
+from services.runtime_paths import DATA_ROOT, QDRANT_DIR, ensure_runtime_dirs
 
-# Load local embedding model
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+HF_CACHE_DIR = os.path.join(DATA_ROOT, "huggingface")
+SENTENCE_TRANSFORMERS_CACHE_DIR = os.path.join(HF_CACHE_DIR, "sentence_transformers")
+os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", SENTENCE_TRANSFORMERS_CACHE_DIR)
+_embedding_model = None
+_embedding_model_lock = threading.Lock()
 
 # Support Qdrant Cloud or fallback to local
 QDRANT_URL = os.getenv("QDRANT_URL")
@@ -71,6 +76,19 @@ def init_qdrant():
 
 init_qdrant()
 
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                print(f"Loading embedding model: {EMBEDDING_MODEL}")
+                _embedding_model = SentenceTransformer(
+                    EMBEDDING_MODEL,
+                    cache_folder=SENTENCE_TRANSFORMERS_CACHE_DIR,
+                )
+    return _embedding_model
+
 class VectorStore:
     @staticmethod
     def _stage_priority(stage: str) -> int:
@@ -92,6 +110,7 @@ class VectorStore:
 
     @staticmethod
     def add_chunks(chunks):
+        embedding_model = get_embedding_model()
         points = []
         for chunk in chunks:
             vector = embedding_model.encode(chunk["text"]).tolist()
@@ -172,6 +191,7 @@ class VectorStore:
 
     @staticmethod
     def search(query: str, limit: int = 4, video_id: str | None = None, video_ids: list[str] | None = None):
+        embedding_model = get_embedding_model()
         vector = embedding_model.encode(query).tolist()
         query_filter = VectorStore._build_video_filter(video_id=video_id, video_ids=video_ids)
 

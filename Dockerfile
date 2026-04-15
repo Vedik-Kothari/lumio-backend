@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 ENV APP_DATA_DIR=/app/data
+ENV HF_HOME=/app/data/huggingface
+ENV SENTENCE_TRANSFORMERS_HOME=/app/data/huggingface/sentence_transformers
 ENV PIP_NO_CACHE_DIR=1
 
 # Install Python dependencies first for better layer caching
