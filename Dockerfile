@@ -9,12 +9,13 @@ WORKDIR /app
 
 ENV APP_DATA_DIR=/app/data
 
-# Install Python dependencies
+# Install Python dependencies first for better layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the backend application code
-COPY . .
+# Copy only the application code needed at runtime
+COPY main.py .
+COPY services ./services
 
 # Create the shared runtime data directory
 RUN mkdir -p /app/data
