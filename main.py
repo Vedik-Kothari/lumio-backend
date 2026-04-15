@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from dotenv import load_dotenv
 load_dotenv()  # Loads GROQ_API_KEY from backend/.env automatically
 
@@ -10,8 +11,10 @@ from pydantic import BaseModel
 import shutil
 import uuid
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse, urlencode
+from urllib.request import urlopen
 
-from services.video_processor import process_video_pipeline
+from services.video_processor import build_chunks, process_video_pipeline
 from services.ai_pipeline import AILogic
 from services.runtime_paths import (
     DATA_ROOT,
@@ -23,6 +26,7 @@ from services.runtime_paths import (
     uploaded_matches_pattern,
     video_frames_dir,
 )
+from services.vector_store import VectorStore
 
 app = FastAPI(title="Multimodal RAG API")
 
@@ -61,6 +65,7 @@ class DeleteVideosRequest(BaseModel):
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
+from youtube_transcript_api import YouTubeTranscriptApi
 
 YTDLP_DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -114,18 +119,159 @@ def classify_ytdlp_error(error: Exception) -> tuple[int, str]:
         return (
             422,
             "YouTube blocked this download from the cloud server with a bot-check. "
-            "Try uploading the video file directly, or configure backend env var "
-            "`YTDLP_COOKIES` or `YTDLP_COOKIES_PATH` with exported YouTube cookies to enable authenticated downloads.",
+            "Lumio already attempted transcript-first retrieval. If this link still fails, "
+            "configure backend env var `YTDLP_COOKIES` or `YTDLP_COOKIES_PATH` with exported YouTube cookies "
+            "to enable authenticated fallback downloads.",
         )
 
     if "http error 429" in lowered or "too many requests" in lowered:
         return (
             429,
             "YouTube rate-limited this server while fetching the video. "
-            "Please retry in a bit, upload the file directly, or configure yt-dlp cookies for the backend.",
+            "Please retry in a bit, or configure yt-dlp cookies for the backend to improve direct-access fallback.",
         )
 
     return 500, message
+
+
+def is_youtube_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return "youtube.com" in host or "youtu.be" in host
+
+
+def extract_youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    if "youtu.be" in host:
+        candidate = parsed.path.strip("/").split("/")[0]
+        return candidate or None
+
+    if "youtube.com" in host:
+        if parsed.path == "/watch":
+            return parse_qs(parsed.query).get("v", [None])[0]
+        if parsed.path.startswith(("/shorts/", "/embed/", "/live/")):
+            parts = [part for part in parsed.path.split("/") if part]
+            return parts[1] if len(parts) > 1 else None
+
+    match = re.search(r"(?:v=|/)([0-9A-Za-z_-]{11})(?:[?&/]|$)", url)
+    return match.group(1) if match else None
+
+
+def fetch_youtube_oembed_metadata(url: str) -> dict:
+    endpoint = "https://www.youtube.com/oembed?" + urlencode({"url": url, "format": "json"})
+    try:
+        with urlopen(endpoint, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as error:
+        print(f"Could not fetch YouTube oEmbed metadata: {error}")
+        return {}
+
+
+def fetch_youtube_transcript_segments(video_key: str) -> list[dict]:
+    preferred_languages = [
+        code.strip()
+        for code in os.getenv(
+            "YOUTUBE_TRANSCRIPT_LANGUAGES",
+            "en,en-US,en-GB,hi,es,fr,de,pt,ja,ko",
+        ).split(",")
+        if code.strip()
+    ]
+
+    api = YouTubeTranscriptApi()
+    transcript_list = api.list(video_key)
+
+    transcript = None
+    if preferred_languages:
+        try:
+            transcript = transcript_list.find_transcript(preferred_languages)
+        except Exception:
+            transcript = None
+
+        if transcript is None:
+            try:
+                transcript = transcript_list.find_generated_transcript(preferred_languages)
+            except Exception:
+                transcript = None
+
+    if transcript is None:
+        transcript = next(iter(transcript_list), None)
+
+    if transcript is None:
+        raise RuntimeError("No transcript could be found for this YouTube video.")
+
+    fetched = transcript.fetch()
+    segments = []
+    for item in fetched:
+        start = float(item.get("start", 0))
+        duration = float(item.get("duration", 0))
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        segments.append(
+            {
+                "start": start,
+                "end": start + duration,
+                "text": text,
+            }
+        )
+    return segments
+
+
+async def process_youtube_transcript_pipeline(url: str, video_id: str, progress_callback):
+    video_key = extract_youtube_video_id(url)
+    if not video_key:
+        raise HTTPException(status_code=400, detail="Could not parse the YouTube video ID from that link.")
+
+    progress_callback("Reading YouTube transcript...", 12, phase="transcript_fetch")
+    segments = fetch_youtube_transcript_segments(video_key)
+    if not segments:
+        raise RuntimeError("No transcript lines were returned for this YouTube video.")
+
+    progress_callback("Collecting video metadata...", 28, phase="metadata_fetch")
+    oembed = fetch_youtube_oembed_metadata(url)
+    duration_seconds = int(segments[-1]["end"]) if segments else None
+
+    write_video_metadata(
+        video_id,
+        {
+            "title": oembed.get("title") or f"YouTube video {video_key}",
+            "source_type": "youtube_link",
+            "source_url": url,
+            "duration_seconds": duration_seconds,
+            "channel": oembed.get("author_name"),
+            "thumbnail": f"https://i.ytimg.com/vi/{video_key}/hqdefault.jpg",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        },
+    )
+
+    progress_callback("Building transcript-first search index...", 56, phase="initial_index")
+    transcript_chunks = build_chunks(
+        video_id=video_id,
+        segments=segments,
+        frame_captions=[],
+        stage="transcript_only",
+    )
+
+    if not transcript_chunks:
+        raise RuntimeError("Transcript was found, but no searchable chunks could be created.")
+
+    VectorStore.replace_video_chunks(video_id, transcript_chunks)
+    progress_callback(
+        "Search ready from YouTube transcript.",
+        100,
+        phase="complete",
+        is_search_ready=True,
+        is_complete=True,
+        search_quality="transcript_only",
+        warning="This answer path is transcript-grounded. Deep visual enrichment was skipped for this link.",
+    )
+    return {
+        "chunks": transcript_chunks,
+        "search_ready": True,
+        "processing_complete": True,
+        "search_quality": "transcript_only",
+    }
 
 def cleanup_old_files(current_video_id: str):
     try:
@@ -229,12 +375,26 @@ async def upload_video_link(request: UrlUploadRequest):
         raise HTTPException(status_code=400, detail="No URL provided")
         
     video_id = request.video_id or str(uuid.uuid4())
-    set_progress(video_id, "Downloading Video...", 0, phase="downloading")
-    ydl_opts = build_ytdlp_options(video_id)
+    set_progress(video_id, "Preparing source...", 0, phase="preparing")
     
     try:
         def update_progress(status: str, percent: int, **extra):
             set_progress(video_id, status, percent, **extra)
+
+        cleanup_old_files(video_id)
+
+        if is_youtube_url(url):
+            try:
+                return {
+                    "status": "success",
+                    "video_id": video_id,
+                    **(await process_youtube_transcript_pipeline(url, video_id, update_progress)),
+                }
+            except Exception as transcript_error:
+                print(f"YouTube transcript-first path failed: {transcript_error}")
+                update_progress("Transcript path unavailable. Trying direct video access...", 18, phase="download_fallback")
+
+        ydl_opts = build_ytdlp_options(video_id)
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -251,9 +411,6 @@ async def upload_video_link(request: UrlUploadRequest):
                     "created_at": datetime.utcnow().isoformat() + "Z",
                 },
             )
-            
-        # Clean old videos from disk
-        cleanup_old_files(video_id)
             
         # Run processing pipeline
         result = await process_video_pipeline(file_path, video_id, progress_callback=update_progress)

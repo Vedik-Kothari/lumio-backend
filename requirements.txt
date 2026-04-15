@@ -11,3 +11,4 @@ imageio-ffmpeg
 Pillow
 python-dotenv
 yt-dlp
+youtube-transcript-api
