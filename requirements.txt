@@ -1,7 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn[standard]
 python-multipart
 qdrant-client
+torch==2.5.1+cpu
 sentence-transformers
 groq
 ffmpeg-python
